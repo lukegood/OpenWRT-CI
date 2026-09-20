@@ -116,7 +116,11 @@ UPDATE_PACKAGE "theme-fluent" "LazuliKao/luci-theme-fluent" "main"
 #UPDATE_PACKAGE "homeproxy" "VIKINGYFY/homeproxy" "main"
 UPDATE_PACKAGE "momo" "nikkinikki-org/OpenWrt-momo" "main"
 UPDATE_PACKAGE "nikki" "nikkinikki-org/OpenWrt-nikki" "main"
-UPDATE_PACKAGE "openclash" "vernesong/OpenClash" "dev" "pkg"
+# OpenClash is opt-in via WRT_PACKAGE (WLG RE-CS-07). Cloning the feed without
+# CONFIG_PACKAGE_luci-app-openclash=y leaves no LuCI menu in the firmware.
+if printf '%s\n' "${WRT_PACKAGE:-}" | grep -qx 'CONFIG_PACKAGE_luci-app-openclash=y'; then
+	UPDATE_PACKAGE "openclash" "vernesong/OpenClash" "dev" "pkg"
+fi
 #UPDATE_PACKAGE "passwall" "Openwrt-Passwall/openwrt-passwall" "main" "pkg"
 #UPDATE_PACKAGE "passwall2" "Openwrt-Passwall/openwrt-passwall2" "main" "pkg"
 

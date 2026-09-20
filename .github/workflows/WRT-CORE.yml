@@ -911,6 +911,18 @@ jobs:
               exit 1
             }
           done
+          if [ -n "${WRT_PACKAGE:-}" ]; then
+            while IFS= read -r pkg_line; do
+              case "$pkg_line" in
+                CONFIG_PACKAGE_*=y)
+                  grep -Fxq "$pkg_line" .config || {
+                    echo "ERROR: extra package from WRT_PACKAGE was dropped by defconfig: $pkg_line" >&2
+                    exit 1
+                  }
+                  ;;
+              esac
+            done < <(printf '%s\n' "$WRT_PACKAGE")
+          fi
           if [ "${WRT_CONTAINER_RUNTIME_RESOLVED_MODE:-}" = "openwrt" ]; then
             for package in containerd nerdctl runc; do
               grep -q "^CONFIG_PACKAGE_${package}=y$" .config || {

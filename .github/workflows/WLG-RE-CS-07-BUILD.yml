@@ -37,6 +37,10 @@ jobs:
       WRT_FEATURE_OVERLAY: true
       WRT_TAILSCALE_ROUTE_RECONCILE: true
       WRT_PW: 无
+      # Packages.sh only clones OpenClash when this symbol is requested.
+      # Without it, luci-app-openclash is never selected and LuCI has no menu.
+      WRT_PACKAGE: |
+        CONFIG_PACKAGE_luci-app-openclash=y
       WRT_REPO: https://github.com/VIKINGYFY/immortalwrt.git
       WRT_BRANCH: main
       WRT_COMMIT: a4638cd4389183f1a1fcad0441f491ca11c97757
