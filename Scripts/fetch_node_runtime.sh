@@ -17,7 +17,6 @@ PI_MODEL_CATALOG="$ROOT_DIR/files/etc/pi/agent/models.json"
 PI_EXTENSION_PEER_SCRIPT="$ROOT_DIR/Scripts/ensure_pi_extension_peers.js"
 PI_EXTENSION_VERIFY_SCRIPT="$ROOT_DIR/Scripts/verify_pi_extensions.js"
 AGENT_RUNTIME_MANIFEST_DIR="$ROOT_DIR/Scripts/node-agent-runtime"
-PI_PLAN_MODE_VENDOR_DIR="$AGENT_RUNTIME_MANIFEST_DIR/vendor/pi-plan-mode"
 
 # Default Node.js target version (Node 24 LTS line)
 NODE_DEFAULT_VERSION="24.20.0"
@@ -298,8 +297,7 @@ preinstall_cli_agents_and_extensions() (
 	cp "$AGENT_RUNTIME_MANIFEST_DIR/package.json" "$staging_dir/"
 	node "$PI_EXTENSION_PEER_SCRIPT" --directory "$staging_dir" \
 		--os linux --cpu "$npm_arch" --libc musl
-	node "$PI_EXTENSION_VERIFY_SCRIPT" --directory "$staging_dir" \
-		--vendor-extension "$PI_PLAN_MODE_VENDOR_DIR/plan-mode.ts"
+	node "$PI_EXTENSION_VERIFY_SCRIPT" --directory "$staging_dir"
 
 	[ -d "$staging_dir/node_modules" ] || {
 		echo "ERROR: npm install completed without producing node_modules" >&2
@@ -472,21 +470,6 @@ setup_symlinks() {
 	done
 }
 
-install_vendored_pi_extensions() {
-	local target="$NODE_LIB_DIR/pi-plan-mode"
-
-	[ -s "$PI_PLAN_MODE_VENDOR_DIR/plan-mode.ts" ] && \
-		[ -s "$PI_PLAN_MODE_VENDOR_DIR/provenance.json" ] && \
-		[ -s "$PI_PLAN_MODE_VENDOR_DIR/LICENSE" ] || {
-		echo "ERROR: reviewed pi-plan-mode vendor source is incomplete" >&2
-		return 1
-	}
-	rm -rf -- "$target"
-	cp -a "$PI_PLAN_MODE_VENDOR_DIR" "$target"
-	[ -s "$target/plan-mode.ts" ] || return 1
-	log_info "Installed reviewed vendored pi-plan-mode extension."
-}
-
 configure_pi_extensions() {
 	log_info "Writing default Pi extensions configuration..."
 
@@ -501,15 +484,17 @@ configure_pi_extensions() {
 	cp -f "$PI_MODEL_CATALOG" "$PI_CONFIG_DIR/models.json"
 	cat >"$PI_CONFIG_DIR/settings.json" <<'EOF'
 {
-  "defaultProvider": "office-sglang",
-  "defaultModel": "Qwen3.8-27B",
+  "defaultProvider": "commandcode",
+  "defaultModel": "deepseek/deepseek-v4.1-flash",
   "defaultThinkingLevel": "medium",
   "enableInstallTelemetry": false,
   "defaultProjectTrust": "ask",
   "packages": [
+    "npm:@router-for-me/pi-cliproxyapi-provider",
+    "npm:pi-commandcode-provider",
+    "npm:pi-agent-modes",
     "pi-package-manager",
     "btw-pi",
-    "pi-commandcode-provider",
     "pi-web-search",
     "pi-wechat-assistant",
     "pi-mcp-adapter",
@@ -519,9 +504,6 @@ configure_pi_extensions() {
     "@luxusai/pi-hindsight",
     "pi-interactive-shell",
     "@narumitw/pi-statusline"
-  ],
-  "extensions": [
-    "/tmp/agent-runtime-pi-plan-mode.ts"
   ],
   "autoUpdate": false
 }
@@ -548,7 +530,6 @@ main() {
 	printf '%s\n' "$installed_node_version" >"$TARGET_FILES/etc/agent-runtime/node-version"
 
 	preinstall_cli_agents_and_extensions "$node_arch"
-	install_vendored_pi_extensions
 	setup_symlinks
 	install_pi_search_tools "$node_arch"
 	configure_pi_extensions

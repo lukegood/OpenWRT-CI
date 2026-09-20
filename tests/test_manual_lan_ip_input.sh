@@ -8,25 +8,30 @@ WRT_CORE="$ROOT_DIR/.github/workflows/WRT-CORE.yml"
 VALIDATOR="$ROOT_DIR/Scripts/ValidateLanIp.sh"
 
 for workflow in $(discover_device_workflows); do
-  grep -q '^      LAN_IP:' "$workflow" || continue
+	grep -q '^      LAN_IP:' "$workflow" || continue
 
-  # WLG builds use a dedicated LAN subnet to avoid conflicts with the
-  # default 192.168.10.0/24 production network.
-  if echo "$workflow" | grep -qi 'wlg'; then
-    DEFAULT_IP='192.168.50.1'
-  else
-    DEFAULT_IP='192.168.10.1'
-  fi
-
-  grep -q "default: '$DEFAULT_IP'" "$workflow" || {
-    echo "$workflow missing default LAN IP $DEFAULT_IP"
-    exit 1
-  }
-
-  grep -q "WRT_IP: \${{ inputs.LAN_IP || '$DEFAULT_IP' }}" "$workflow" || {
-    echo "$workflow does not pass LAN_IP into WRT-CORE with default fallback"
-    exit 1
-  }
+	workflow_name="$(basename "$workflow")"
+	# WLG builds use 192.168.50.1 as the default LAN IP by design (friend-facing
+	# firmware on a different subnet).  All other device workflows use 192.168.10.1.
+	if echo "$workflow_name" | grep -qi 'wlg'; then
+		grep -q "default: '192.168.50.1'" "$workflow" || {
+			echo "$workflow missing default LAN IP 192.168.50.1"
+			exit 1
+		}
+		grep -q "WRT_IP: \${{ inputs.LAN_IP || '192.168.50.1' }}" "$workflow" || {
+			echo "$workflow does not pass LAN_IP into WRT-CORE with default fallback"
+			exit 1
+		}
+	else
+		grep -q "default: '192.168.10.1'" "$workflow" || {
+			echo "$workflow missing default LAN IP 192.168.10.1"
+			exit 1
+		}
+		grep -q "WRT_IP: \${{ inputs.LAN_IP || '192.168.10.1' }}" "$workflow" || {
+			echo "$workflow does not pass LAN_IP into WRT-CORE with default fallback"
+			exit 1
+		}
+	fi
 done
 
 grep -q "Scripts/ValidateLanIp.sh" "$WRT_CORE" || {

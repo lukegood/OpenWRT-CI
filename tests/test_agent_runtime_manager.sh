@@ -29,13 +29,17 @@ grep -Fq 'agent-runtime reconcile --json' "$INIT" || fail "runtime reconcile mis
 for term in 'generations' 'quarantine' 'flock -n 9' 'usign -V' 'archive_is_safe' 'links_are_safe' 'verify_critical_hashes' 'runtime_health' 'runtime_uv_dir' 'critical_uv'; do
   grep -Fq "$term" "$MANAGER" || fail "manager omits $term"
 done
-for term in 'publish_pi_models' "local runtime=\"\$1\" node_dir source link=\"/tmp/agent-runtime-pi-plan-mode.ts\"" 'local temporary="${link}.new.$$"' "vllm-qwen38"; do
+for term in 'publish_pi_models' "vllm-qwen38"; do
   grep -Fq "$term" "$MANAGER" || fail "manager omits $term"
 done
 for command in pi cmdc multica; do
   grep -Fq "for command in pi cmdc multica" "$MANAGER" || fail "runtime health does not cover Pi, CommandCode and Multica"
 done
-if grep -Eqi 'hermes|opencode' "$MANAGER" "$INIT" "$MULTICA" "$NODE_PROFILE" "$UPDATE_PROFILE"; then
+# opencode is a first-class runtime provider since 111ff1b (per-device
+# provisioning: re-cs-02/re-cs-07 default multica runtime_provider=opencode,
+# gated on /etc/opencode/release-url), so only the truly retired CLI
+# (hermes) must stay out of runtime scripts.
+if grep -Eqi 'hermes' "$MANAGER" "$INIT" "$MULTICA" "$NODE_PROFILE" "$UPDATE_PROFILE"; then
 	fail "runtime scripts still reference a retired CLI"
 fi
 

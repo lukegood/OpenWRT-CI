@@ -110,6 +110,32 @@ append_reviewed_p27() {
 	printf '%s\n' "  $number         4175872        15269854   5.3 GiB    8300  data" >>"$path"
 }
 
+# 128GB jdcloud,re-cs-07 layout: p24 is an empty-named 112.6GiB 8300
+# partition with no filesystem. The p24 line deliberately ends after "8300"
+# so that awk sees an empty $7 (GPT name).
+write_128g_table() {
+	local path="$1"
+	printf '%s\n' \
+		'Disk /dev/mmcblk0: 240615424 sectors, 114.7 GiB' \
+		'Partition table holds up to 28 entries' \
+		'First usable sector is 34, last usable sector is 240615416' \
+		'Number  Start (sector)    End (sector)  Size       Code  Name' \
+		'  18           53282         4247137   2.0 GiB    FFFF  rootfs' \
+		'  22         4247138         4288101   20.0 MiB   FFFF  rootfs_data' \
+		'  23         4288102         4289125   512.0 KiB  FFFF  ETHPHYFW' \
+		'  24         4429824       240613375   112.6 GiB  8300' >"$path"
+}
+
+setup_128g_case() {
+	local case_root="$1"
+	mkdir -p "$case_root/sys/block/mmcblk0/queue" "$case_root/state" "$case_root/dev"
+	printf '%s\n' jdcloud,re-cs-07 >"$case_root/board"
+	printf '%s\n' 512 >"$case_root/sys/block/mmcblk0/queue/logical_block_size"
+	printf '%s\n' 240615424 >"$case_root/sys/block/mmcblk0/size"
+	: >"$case_root/mounts"
+	write_128g_table "$case_root/table"
+}
+
 run_fixture() {
 	local case_root="$1"
 	shift
@@ -407,8 +433,11 @@ fi
 CASE_GAPPED="$TMP_ROOT/p27-gapped"
 setup_case "$CASE_GAPPED" jdcloud,re-cs-07 4173857
 printf '%s\n' '  27         4177920        15269854   5.3 GiB    8300  data' >>"$CASE_GAPPED/table"
-EMMC_DATA_TEST_START=4177920 EMMC_DATA_TEST_END=15269854 EMMC_DATA_TEST_INFO_NAME=data \
-	EMMC_DATA_TEST_PARTITION_TYPE=8300 EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_GAPPED"
+if EMMC_DATA_TEST_START=4177920 EMMC_DATA_TEST_END=15269854 EMMC_DATA_TEST_INFO_NAME=data \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_GAPPED"; then
+	echo "gapped raw legacy p27 should have been rejected (non-zero)"
+	exit 1
+fi
 [ ! -e "$CASE_GAPPED/state/mkfs.calls" ] || {
 	echo "gapped legacy p27 was formatted"
 	exit 1
@@ -430,6 +459,446 @@ timeout_elapsed=$(( $(date +%s) - timeout_started ))
 }
 grep -Fxq 'reason=mkfs-timeout' "$CASE_REAL_TIMEOUT/overlay/failed" || {
 	echo "real mkfs timeout was not persisted"
+	exit 1
+}
+
+# --- Unnamed large data partition (128GB re-cs-07 p24) tests ---
+
+# A raw empty-named 8300 tail partition (128GB re-cs-07 p24) is adopted
+# and formatted once. No GPT mutation (no -e/--new/--backup) may occur.
+CASE_UNNAMED_RAW="$TMP_ROOT/unnamed-raw-128g"
+setup_128g_case "$CASE_UNNAMED_RAW"
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_UNNAMED_RAW/fstab" \
+	run_fixture "$CASE_UNNAMED_RAW"
+grep -Fq -- '-F -L openwrt-data' "$CASE_UNNAMED_RAW/state/mkfs.calls" || {
+	echo "raw unnamed p24 was not initialized"
+	exit 1
+}
+if [ -e "$CASE_UNNAMED_RAW/state/sgdisk.calls" ] && \
+	grep -Eq -- '--backup=|--new=|^-e( |$)' "$CASE_UNNAMED_RAW/state/sgdisk.calls"; then
+	echo "unnamed p24 adoption reached a GPT mutation path"
+	exit 1
+fi
+[ -f "$CASE_UNNAMED_RAW/fstab" ] || {
+	echo "raw unnamed p24 did not persist fstab mount config"
+	exit 1
+}
+grep -Fxq 'uuid=legacy-uuid' "$CASE_UNNAMED_RAW/fstab" || {
+	echo "raw unnamed p24 fstab does not carry the filesystem UUID"
+	exit 1
+}
+[ -f "$CASE_UNNAMED_RAW/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "raw unnamed p24 was not approved for mount"
+	exit 1
+}
+
+# An existing ext4 on an unnamed tail partition is preserved: no mkfs,
+# fstab + approval are written so 99-auto-mount-data can mount by UUID.
+CASE_UNNAMED_EXT4="$TMP_ROOT/unnamed-ext4-preserve"
+setup_128g_case "$CASE_UNNAMED_EXT4"
+EMMC_DATA_TEST_FILESYSTEM_TYPE=ext4 EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_UNNAMED_EXT4/fstab" \
+	run_fixture "$CASE_UNNAMED_EXT4"
+[ ! -e "$CASE_UNNAMED_EXT4/state/mkfs.calls" ] || {
+	echo "healthy ext4 on unnamed p24 was reformatted"
+	exit 1
+}
+[ -f "$CASE_UNNAMED_EXT4/fstab" ] || {
+	echo "ext4 unnamed p24 did not persist fstab mount config"
+	exit 1
+}
+grep -Fxq 'fstype=ext4' "$CASE_UNNAMED_EXT4/fstab" || {
+	echo "ext4 unnamed p24 fstab does not carry ext4 type"
+	exit 1
+}
+[ -f "$CASE_UNNAMED_EXT4/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "ext4 unnamed p24 was not approved for mount"
+	exit 1
+}
+
+# An existing f2fs on an unnamed tail partition is likewise preserved.
+CASE_UNNAMED_F2FS="$TMP_ROOT/unnamed-f2fs-preserve"
+setup_128g_case "$CASE_UNNAMED_F2FS"
+EMMC_DATA_TEST_FILESYSTEM_TYPE=f2fs EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_UNNAMED_F2FS/fstab" \
+	run_fixture "$CASE_UNNAMED_F2FS"
+[ ! -e "$CASE_UNNAMED_F2FS/state/mkfs.calls" ] || {
+	echo "healthy f2fs on unnamed p24 was reformatted"
+	exit 1
+}
+grep -Fxq 'fstype=f2fs' "$CASE_UNNAMED_F2FS/fstab" || {
+	echo "f2fs unnamed p24 fstab does not carry f2fs type"
+	exit 1
+}
+
+# Multiple unnamed 8300 partitions meeting the size threshold must be
+# rejected: automatic selection is ambiguous and unsafe.
+CASE_UNNAMED_MULTI="$TMP_ROOT/unnamed-multiple"
+mkdir -p "$CASE_UNNAMED_MULTI/sys/block/mmcblk0/queue" "$CASE_UNNAMED_MULTI/state" "$CASE_UNNAMED_MULTI/dev"
+printf '%s\n' jdcloud,re-cs-07 >"$CASE_UNNAMED_MULTI/board"
+printf '%s\n' 512 >"$CASE_UNNAMED_MULTI/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 240615424 >"$CASE_UNNAMED_MULTI/sys/block/mmcblk0/size"
+: >"$CASE_UNNAMED_MULTI/mounts"
+printf '%s\n' \
+	'Disk /dev/mmcblk0: 240615424 sectors, 114.7 GiB' \
+	'Partition table holds up to 28 entries' \
+	'First usable sector is 34, last usable sector is 240615416' \
+	'Number  Start (sector)    End (sector)  Size       Code  Name' \
+	'  18           53282         4247137   2.0 GiB    FFFF  rootfs' \
+	'  22         4247138         4288101   20.0 MiB   FFFF  rootfs_data' \
+	'  23         4289126         8484897   2.0 GiB    8300' \
+	'  24         8484898       240613375   110.6 GiB  8300' >"$CASE_UNNAMED_MULTI/table"
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_MULTI"
+[ ! -e "$CASE_UNNAMED_MULTI/state/mkfs.calls" ] || {
+	echo "multiple unnamed candidates were not rejected"
+	exit 1
+}
+
+# A filesystem probe failure on an unnamed candidate is ambiguous and must
+# never authorise mkfs.
+CASE_UNNAMED_BLKID="$TMP_ROOT/unnamed-blkid-failure"
+setup_128g_case "$CASE_UNNAMED_BLKID"
+if EMMC_DATA_TEST_BLKID_FAILURE=1 EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_BLKID"; then
+	echo "blkid probe failure on unnamed p24 was treated as a raw partition"
+	exit 1
+fi
+[ ! -e "$CASE_UNNAMED_BLKID/state/mkfs.calls" ] || {
+	echo "blkid probe failure formatted unnamed p24"
+	exit 1
+}
+
+# An unnamed partition below the minimum size is not adopted; the script
+# falls through to tail allocation (which fails here with no tail space).
+CASE_UNNAMED_SMALL="$TMP_ROOT/unnamed-too-small"
+mkdir -p "$CASE_UNNAMED_SMALL/sys/block/mmcblk0/queue" "$CASE_UNNAMED_SMALL/state" "$CASE_UNNAMED_SMALL/dev"
+printf '%s\n' jdcloud,re-cs-07 >"$CASE_UNNAMED_SMALL/board"
+printf '%s\n' 512 >"$CASE_UNNAMED_SMALL/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 5000000 >"$CASE_UNNAMED_SMALL/sys/block/mmcblk0/size"
+: >"$CASE_UNNAMED_SMALL/mounts"
+printf '%s\n' \
+	'Disk /dev/mmcblk0: 5000000 sectors, 2.4 GiB' \
+	'Partition table holds up to 28 entries' \
+	'First usable sector is 34, last usable sector is 4999966' \
+	'Number  Start (sector)    End (sector)  Size       Code  Name' \
+	'  18           53282         4247137   2.0 GiB    FFFF  rootfs' \
+	'  22         4247138         4288101   20.0 MiB   FFFF  rootfs_data' \
+	'  24         4288102         4999966   347.6 MiB  8300' >"$CASE_UNNAMED_SMALL/table"
+if EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4288102 EMMC_DATA_TEST_END=4999966 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_SMALL"; then
+	echo "too-small unnamed p24 was unexpectedly adopted"
+	exit 1
+fi
+[ ! -e "$CASE_UNNAMED_SMALL/state/mkfs.calls" ] || {
+	echo "too-small unnamed p24 was formatted"
+	exit 1
+}
+
+# An unnamed 8300 partition that is not at the tail of the table is left
+# untouched; automatic adoption requires the reviewed tail geometry.
+CASE_UNNAMED_NONTAIL="$TMP_ROOT/unnamed-non-tail"
+mkdir -p "$CASE_UNNAMED_NONTAIL/sys/block/mmcblk0/queue" "$CASE_UNNAMED_NONTAIL/state" "$CASE_UNNAMED_NONTAIL/dev"
+printf '%s\n' jdcloud,re-cs-07 >"$CASE_UNNAMED_NONTAIL/board"
+printf '%s\n' 512 >"$CASE_UNNAMED_NONTAIL/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 240615424 >"$CASE_UNNAMED_NONTAIL/sys/block/mmcblk0/size"
+: >"$CASE_UNNAMED_NONTAIL/mounts"
+printf '%s\n' \
+	'Disk /dev/mmcblk0: 240615424 sectors, 114.7 GiB' \
+	'Partition table holds up to 28 entries' \
+	'First usable sector is 34, last usable sector is 240615416' \
+	'Number  Start (sector)    End (sector)  Size       Code  Name' \
+	'  18           53282         4247137   2.0 GiB    FFFF  rootfs' \
+	'  22         4247138         4288101   20.0 MiB   FFFF  rootfs_data' \
+	'  23         4289126         8484897   2.0 GiB    8300' \
+	'  24         8484898       240613375   110.6 GiB  FFFF  reserved' >"$CASE_UNNAMED_NONTAIL/table"
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4289126 EMMC_DATA_TEST_END=8484897 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_NONTAIL"
+[ ! -e "$CASE_UNNAMED_NONTAIL/state/mkfs.calls" ] || {
+	echo "non-tail unnamed p23 was formatted"
+	exit 1
+}
+
+# An unnamed partition with a non-8300 GPT type is refused.
+CASE_UNNAMED_BADTYPE="$TMP_ROOT/unnamed-bad-gpt-type"
+setup_128g_case "$CASE_UNNAMED_BADTYPE"
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=FFFF \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_BADTYPE"
+[ ! -e "$CASE_UNNAMED_BADTYPE/state/mkfs.calls" ] || {
+	echo "unnamed p24 with non-8300 GPT type was formatted"
+	exit 1
+}
+
+# An unsupported filesystem (e.g. xfs) on an unnamed tail partition is left
+# untouched; only ext4/f2fs may be preserved.
+CASE_UNNAMED_UNKNOWNFS="$TMP_ROOT/unnamed-unknown-fs"
+setup_128g_case "$CASE_UNNAMED_UNKNOWNFS"
+EMMC_DATA_TEST_FILESYSTEM_TYPE=xfs EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_UNKNOWNFS"
+[ ! -e "$CASE_UNNAMED_UNKNOWNFS/state/mkfs.calls" ] || {
+	echo "xfs on unnamed p24 was reformatted"
+	exit 1
+}
+[ ! -f "$CASE_UNNAMED_UNKNOWNFS/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "xfs on unnamed p24 was approved for mount"
+	exit 1
+}
+
+# A hung mkfs on an unnamed raw partition is recorded as non-retryable.
+CASE_UNNAMED_TIMEOUT="$TMP_ROOT/unnamed-raw-timeout"
+setup_128g_case "$CASE_UNNAMED_TIMEOUT"
+EMMC_DATA_TEST_FORMAT_TIMEOUT=1 EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_TIMEOUT"
+grep -Fxq 'reason=mkfs-timeout' "$CASE_UNNAMED_TIMEOUT/overlay/failed" || {
+	echo "timed-out unnamed p24 initialization was not recorded as non-retryable"
+	exit 1
+}
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_TIMEOUT"
+[ ! -e "$CASE_UNNAMED_TIMEOUT/state/mkfs.calls" ] || {
+	echo "timed-out unnamed p24 initialization retried on a later boot"
+	exit 1
+}
+
+# Idempotency: after a successful unnamed p24 adoption, a second run must
+# skip everything because approved_data_exists finds LABEL=openwrt-data.
+CASE_UNNAMED_IDEMPOTENT="$TMP_ROOT/unnamed-idempotent"
+setup_128g_case "$CASE_UNNAMED_IDEMPOTENT"
+EMMC_DATA_TEST_INFO_NAME= EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_UNNAMED_IDEMPOTENT/fstab" \
+	run_fixture "$CASE_UNNAMED_IDEMPOTENT"
+grep -Fq -- '-F -L openwrt-data' "$CASE_UNNAMED_IDEMPOTENT/state/mkfs.calls" || {
+	echo "first-run unnamed p24 was not initialized"
+	exit 1
+}
+# Second run: the formatted marker makes filesystem_type return ext4 and
+# approved_data_exists returns true, so no further mkfs should occur.
+: >"$CASE_UNNAMED_IDEMPOTENT/state/mkfs.calls"
+EMMC_DATA_TEST_EXISTING_DATA=1 EMMC_DATA_TEST_INFO_NAME= \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=240613375 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_UNNAMED_IDEMPOTENT"
+[ ! -s "$CASE_UNNAMED_IDEMPOTENT/state/mkfs.calls" ] || {
+	echo "second run reformatted an already-approved unnamed p24"
+	exit 1
+}
+
+
+# ============================================================================
+# Dynamic discovery + geometry relaxation tests
+# Covers re-ss-01 (aligned, LABEL=openwrt-data), re-cs-02 (misaligned,
+# PARTLABEL=data ext4), re-cs-07 (unnamed raw p24) layouts.
+# ============================================================================
+
+# --- re-cs-02: existing ext4 PARTLABEL=data with MISALIGNED start ---
+# Vendor-preinstalled ext4 may start immediately after swap without 1MiB
+# padding. The geometry check must SKIP start alignment for existing fs and
+# write the approval file so 99 can mount by UUID.
+CASE_LEGACY_EXT4_MISALIGNED="$TMP_ROOT/legacy-ext4-misaligned"
+setup_case "$CASE_LEGACY_EXT4_MISALIGNED" jdcloud,re-cs-02 5656609
+printf '%s\n' '  27         5656610        15269854   4.6 GiB    8300  data' >>"$CASE_LEGACY_EXT4_MISALIGNED/table"
+EMMC_DATA_TEST_FILESYSTEM_TYPE=ext4 EMMC_DATA_TEST_START=5656610 EMMC_DATA_TEST_END=15269854 \
+	EMMC_DATA_TEST_INFO_NAME=data EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_LEGACY_EXT4_MISALIGNED"
+[ ! -e "$CASE_LEGACY_EXT4_MISALIGNED/state/mkfs.calls" ] || {
+	echo "misaligned ext4 legacy p27 was reformatted"
+	exit 1
+}
+[ -f "$CASE_LEGACY_EXT4_MISALIGNED/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "misaligned ext4 legacy p27 was not approved for UUID migration"
+	exit 1
+}
+grep -Fxq 'number=27' "$CASE_LEGACY_EXT4_MISALIGNED/overlay/.emmc-data-provision.legacy-data-approved" || {
+	echo "misaligned ext4 legacy approval does not carry partition number 27"
+	exit 1
+}
+grep -Fxq 'fstype=ext4' "$CASE_LEGACY_EXT4_MISALIGNED/overlay/.emmc-data-provision.legacy-data-approved" || {
+	echo "misaligned ext4 legacy approval does not carry fstype=ext4"
+	exit 1
+}
+
+# --- Raw PARTLABEL=data with MISALIGNED start must still be strictly rejected ---
+# A raw (no filesystem) partition must pass 1MiB start alignment before it
+# may be formatted. Misaligned raw -> return non-zero, no mkfs, script
+# retained for next-boot retry.
+CASE_LEGACY_RAW_MISALIGNED="$TMP_ROOT/legacy-raw-misaligned"
+setup_case "$CASE_LEGACY_RAW_MISALIGNED" jdcloud,re-cs-02 5656609
+printf '%s\n' '  27         5656610        15269854   4.6 GiB    8300  data' >>"$CASE_LEGACY_RAW_MISALIGNED/table"
+if EMMC_DATA_TEST_START=5656610 EMMC_DATA_TEST_END=15269854 EMMC_DATA_TEST_INFO_NAME=data \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 EMMC_DATA_TEST_DEVICE_READY=1 \
+	run_fixture "$CASE_LEGACY_RAW_MISALIGNED"; then
+	echo "misaligned raw legacy p27 should have been rejected (non-zero)"
+	exit 1
+fi
+[ ! -e "$CASE_LEGACY_RAW_MISALIGNED/state/mkfs.calls" ] || {
+	echo "misaligned raw legacy p27 was formatted"
+	exit 1
+}
+[ ! -f "$CASE_LEGACY_RAW_MISALIGNED/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "misaligned raw legacy p27 was incorrectly approved"
+	exit 1
+}
+
+# --- Geometry failure (not tail partition) returns non-zero ---
+# A PARTLABEL=data partition that is not the last partition must be rejected
+# with non-zero so the script is retained for retry, not silently deleted.
+CASE_LEGACY_NONTAIL="$TMP_ROOT/legacy-nontail"
+setup_case "$CASE_LEGACY_NONTAIL" jdcloud,re-cs-02 4173857
+printf '%s\n' '  27         4175872         8388607   2.0 GiB    8300  data' >>"$CASE_LEGACY_NONTAIL/table"
+printf '%s\n' '  28         8388608        15269854   3.3 GiB    FFFF  vendor_reserved' >>"$CASE_LEGACY_NONTAIL/table"
+if EMMC_DATA_TEST_START=4175872 EMMC_DATA_TEST_END=8388607 EMMC_DATA_TEST_INFO_NAME=data \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 EMMC_DATA_TEST_DEVICE_READY=1 \
+	run_fixture "$CASE_LEGACY_NONTAIL"; then
+	echo "non-tail legacy data partition should have been rejected (non-zero)"
+	exit 1
+fi
+[ ! -e "$CASE_LEGACY_NONTAIL/state/mkfs.calls" ] || {
+	echo "non-tail legacy data partition was formatted"
+	exit 1
+}
+
+# --- re-ss-01: existing LABEL=openwrt-data -> no provision action ---
+# When approved_data_exists finds LABEL=openwrt-data, 98 must exit early
+# without any GPT mutation or mkfs. This is the re-ss-01 steady state.
+CASE_RESS01_EXISTING="$TMP_ROOT/resss01-existing-label"
+setup_case "$CASE_RESS01_EXISTING" jdcloud,re-ss-01 6271000
+printf '%s\n' '  27         6273024        15269854   4.3 GiB    8300  openwrt-data' >>"$CASE_RESS01_EXISTING/table"
+EMMC_DATA_TEST_EXISTING_DATA=1 EMMC_DATA_TEST_START=6273024 EMMC_DATA_TEST_END=15269854 \
+	EMMC_DATA_TEST_INFO_NAME=openwrt-data EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_RESS01_EXISTING"
+[ ! -e "$CASE_RESS01_EXISTING/state/sgdisk.calls" ] && [ ! -e "$CASE_RESS01_EXISTING/state/mkfs.calls" ] || {
+	echo "re-ss-01 existing LABEL=openwrt-data triggered provision action"
+	exit 1
+}
+
+# ============================================================================
+# Adopt function (handle_existing_unnamed_data_partition) generalization tests
+# ============================================================================
+
+# Helper: write a table with a non-tail data candidate followed by a vendor
+# partition at the true tail. Used for adopt non-tail tests.
+write_nontail_adopt_table() {
+	local path="$1" name="${2:-data}" fstype="${3:-}"
+	printf '%s\n' \
+		'Disk /dev/mmcblk0: 240615424 sectors, 114.7 GiB' \
+		'Partition table holds up to 28 entries' \
+		'First usable sector is 34, last usable sector is 240615416' \
+		'Number  Start (sector)    End (sector)  Size       Code  Name' \
+		'  18           53282         4247137   2.0 GiB    FFFF  rootfs' \
+		'  22         4247138         4288101   20.0 MiB   FFFF  rootfs_data' \
+		"  24         4429824         8484897   2.0 GiB    8300  $name" \
+		'  25         8484898       240613375   110.6 GiB  FFFF  vendor_reserved' >"$path"
+}
+
+# --- adopt: existing ext4 + PARTLABEL=data + NON-TAIL -> preserve ---
+# An existing ext4/f2fs is strong evidence; it must be preserved even if not
+# at the tail (vendor may reserve partitions after data).
+CASE_ADOPT_EXT4_NONTAIL="$TMP_ROOT/adopt-ext4-nontail"
+mkdir -p "$CASE_ADOPT_EXT4_NONTAIL/sys/block/mmcblk0/queue" "$CASE_ADOPT_EXT4_NONTAIL/state" "$CASE_ADOPT_EXT4_NONTAIL/dev"
+printf '%s\n' jdcloud,re-cs-07 >"$CASE_ADOPT_EXT4_NONTAIL/board"
+printf '%s\n' 512 >"$CASE_ADOPT_EXT4_NONTAIL/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 240615424 >"$CASE_ADOPT_EXT4_NONTAIL/sys/block/mmcblk0/size"
+: >"$CASE_ADOPT_EXT4_NONTAIL/mounts"
+write_nontail_adopt_table "$CASE_ADOPT_EXT4_NONTAIL/table" data
+EMMC_DATA_TEST_FILESYSTEM_TYPE=ext4 EMMC_DATA_TEST_INFO_NAME=data \
+	EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=8484897 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_ADOPT_EXT4_NONTAIL/fstab" \
+	run_fixture "$CASE_ADOPT_EXT4_NONTAIL"
+[ ! -e "$CASE_ADOPT_EXT4_NONTAIL/state/mkfs.calls" ] || {
+	echo "adopt non-tail ext4 was reformatted"
+	exit 1
+}
+[ -f "$CASE_ADOPT_EXT4_NONTAIL/fstab" ] || {
+	echo "adopt non-tail ext4 did not persist fstab"
+	exit 1
+}
+[ -f "$CASE_ADOPT_EXT4_NONTAIL/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "adopt non-tail ext4 was not approved"
+	exit 1
+}
+
+# --- adopt: raw + NON-TAIL -> still rejected ---
+# A raw partition must be at the tail before it may be formatted.
+CASE_ADOPT_RAW_NONTAIL="$TMP_ROOT/adopt-raw-nontail"
+mkdir -p "$CASE_ADOPT_RAW_NONTAIL/sys/block/mmcblk0/queue" "$CASE_ADOPT_RAW_NONTAIL/state" "$CASE_ADOPT_RAW_NONTAIL/dev"
+printf '%s\n' jdcloud,re-cs-07 >"$CASE_ADOPT_RAW_NONTAIL/board"
+printf '%s\n' 512 >"$CASE_ADOPT_RAW_NONTAIL/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 240615424 >"$CASE_ADOPT_RAW_NONTAIL/sys/block/mmcblk0/size"
+: >"$CASE_ADOPT_RAW_NONTAIL/mounts"
+write_nontail_adopt_table "$CASE_ADOPT_RAW_NONTAIL/table" data
+if EMMC_DATA_TEST_INFO_NAME=data EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4429824 EMMC_DATA_TEST_END=8484897 \
+	EMMC_DATA_TEST_DEVICE_READY=1 run_fixture "$CASE_ADOPT_RAW_NONTAIL"; then
+	echo "adopt non-tail raw should have been rejected (non-zero)"
+	exit 1
+fi
+[ ! -e "$CASE_ADOPT_RAW_NONTAIL/state/mkfs.calls" ] || {
+	echo "adopt non-tail raw was formatted"
+	exit 1
+}
+[ ! -f "$CASE_ADOPT_RAW_NONTAIL/overlay/.emmc-data-provision.legacy-data-approved" ] || {
+	echo "adopt non-tail raw was incorrectly approved"
+	exit 1
+}
+
+# --- adopt: name=openwrt-data raw + tail + unique -> mkfs ---
+# The adopt name matching must include "openwrt-data" (not just empty/data).
+CASE_ADOPT_OPENWRTNAME_RAW="$TMP_ROOT/adopt-openwrtname-raw"
+mkdir -p "$CASE_ADOPT_OPENWRTNAME_RAW/sys/block/mmcblk0/queue" "$CASE_ADOPT_OPENWRTNAME_RAW/state" "$CASE_ADOPT_OPENWRTNAME_RAW/dev"
+printf '%s\n' jdcloud,re-ss-01 >"$CASE_ADOPT_OPENWRTNAME_RAW/board"
+printf '%s\n' 512 >"$CASE_ADOPT_OPENWRTNAME_RAW/sys/block/mmcblk0/queue/logical_block_size"
+printf '%s\n' 15269888 >"$CASE_ADOPT_OPENWRTNAME_RAW/sys/block/mmcblk0/size"
+: >"$CASE_ADOPT_OPENWRTNAME_RAW/mounts"
+printf '%s\n' \
+	'Disk /dev/mmcblk0: 15269888 sectors, 7.3 GiB' \
+	'Partition table holds up to 28 entries' \
+	'First usable sector is 34, last usable sector is 15269854' \
+	'Number  Start (sector)    End (sector)  Size       Code  Name' \
+	'  18           53282         2150433   1024.0 MiB FFFF  rootfs' \
+	'  22         2289698         2330657   20.0 MiB   FFFF  rootfs_data' \
+	'  27         4175872        15269854   5.3 GiB    8300  openwrt-data' >"$CASE_ADOPT_OPENWRTNAME_RAW/table"
+EMMC_DATA_TEST_INFO_NAME=openwrt-data EMMC_DATA_TEST_PARTITION_TYPE=8300 \
+	EMMC_DATA_TEST_START=4175872 EMMC_DATA_TEST_END=15269854 \
+	EMMC_DATA_TEST_DEVICE_READY=1 \
+	EMMC_DATA_TEST_FSTAB_FILE="$CASE_ADOPT_OPENWRTNAME_RAW/fstab" \
+	run_fixture "$CASE_ADOPT_OPENWRTNAME_RAW"
+grep -Fq -- '-F -L openwrt-data' "$CASE_ADOPT_OPENWRTNAME_RAW/state/mkfs.calls" || {
+	echo "adopt name=openwrt-data raw tail partition was not initialized"
+	exit 1
+}
+[ -f "$CASE_ADOPT_OPENWRTNAME_RAW/fstab" ] || {
+	echo "adopt openwrt-name raw did not persist fstab"
+	exit 1
+}
+
+# --- adopt: name matching covers all three (empty, data, openwrt-data) ---
+# Verify the script source includes all three name patterns in the adopt awk.
+grep -Fq '$4 == "" || $4 == "data" || $4 == "openwrt-data"' "$SCRIPT" || {
+	echo "adopt function does not match empty/data/openwrt-data names"
 	exit 1
 }
 

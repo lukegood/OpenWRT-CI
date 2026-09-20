@@ -32,7 +32,7 @@ grep -Fq 'UV_OFFLINE=1' "$ROOT_DIR/files/usr/sbin/uv-runtime-provision" || fail 
 
 for term in 'linux-arm64-musl' 'linux-x64-musl' \
   'prune_foreign_platform_builds' 'verify_agent_runtime_arch' \
-  'install_vendored_pi_extensions' 'install_pi_search_tools' \
+  'install_pi_search_tools' \
   'PI_MODEL_CATALOG="$ROOT_DIR/files/etc/pi/agent/models.json"' \
   'install -Dm0644 "$PI_MODEL_CATALOG" "$TARGET_FILES/etc/pi/agent/models.json"' \
   'cmdc' 'command-code' 'commandcode'; do
@@ -45,7 +45,8 @@ for term in '--ignore-scripts' '--legacy-peer-deps' 'PI EXTENSION DEPENDENCY TRE
 done
 # configure_pi_extensions must register every preinstalled package in Pi's
 # settings so pi actually loads them (not just installs them under /opt/node).
-grep -Fq '"pi-commandcode-provider"' "$FETCH_SCRIPT" || fail "fetch_node_runtime.sh does not register pi-commandcode-provider in settings"
+# Match both "pi-commandcode-provider" (legacy) and "npm:pi-commandcode-provider" (current).
+grep -Fq 'pi-commandcode-provider' "$FETCH_SCRIPT" || fail "fetch_node_runtime.sh does not register pi-commandcode-provider in settings"
 
 if grep -Fq 'CONFIG_PACKAGE_ripgrep=y' "$ROOT_DIR/Config/GENERAL.txt"; then
   fail "feed ripgrep would pull Rust into every firmware build"
@@ -57,7 +58,7 @@ for term in 'PI_FD_VERSION="10.5.0"' 'PI_RIPGREP_VERSION="15.2.0"' \
   grep -Fq "$term" "$FETCH_SCRIPT" || fail "Pi fd verification is incomplete: $term"
 done
 
-for pkg in 'command-code' '@earendil-works/pi-coding-agent' 'pi-package-manager' 'btw-pi' 'pi-web-search' 'pi-wechat-assistant' 'pi-commandcode-provider' 'pi-mcp-adapter' 'pi-subagents' '@capdiem/pi-todo' '@zephyrdeng/pi-review' '@luxusai/pi-hindsight' 'pi-interactive-shell' '@narumitw/pi-statusline' 'pnpm'; do
+for pkg in 'command-code' '@earendil-works/pi-coding-agent' 'pi-package-manager' 'btw-pi' 'pi-web-search' 'pi-wechat-assistant' '@router-for-me/pi-cliproxyapi-provider' 'pi-commandcode-provider' 'pi-mcp-adapter' 'pi-subagents' '@capdiem/pi-todo' '@zephyrdeng/pi-review' '@luxusai/pi-hindsight' 'pi-interactive-shell' '@narumitw/pi-statusline' 'pnpm'; do
   grep -Fq "$pkg" "$MANIFEST" || fail "package manifest omits $pkg"
 done
 node - "$MANIFEST" <<'NODE' || fail "Pi extension catalog is not latest-at-build"
@@ -88,9 +89,12 @@ const fs = require('node:fs');
 const models = JSON.parse(fs.readFileSync(process.env.MODELS, 'utf8'));
 const settings = JSON.parse(fs.readFileSync(process.env.SETTINGS, 'utf8'));
 const provider = models.providers?.['office-sglang'];
-if (!provider || provider.baseUrl !== 'http://192.168.11.159:8001/v1' || provider.api !== 'openai-completions') process.exit(1);
-if (!provider.models?.some(m => m.id === 'Qwen3.8-27B')) process.exit(2);
-if (settings.defaultProvider !== 'office-sglang' || settings.defaultModel !== 'Qwen3.8-27B') process.exit(3);
+if (!provider || provider.baseUrl !== 'http://192.168.11.159:8101/v1' || provider.api !== 'openai-completions' || provider.apiKey !== 'sk-local') process.exit(1);
+const localModel = provider.models?.find(m => m.id === 'Qwen3.8-Flash-Next');
+if (!localModel || localModel.contextWindow !== 262144 || localModel.maxTokens !== 32768 || !localModel.reasoning) process.exit(2);
+if (provider.compat?.supportsReasoningEffort !== true || localModel.thinkingLevelMap?.high !== 'xhigh') process.exit(12);
+if (settings.defaultProvider !== 'commandcode' || settings.defaultModel !== 'deepseek/deepseek-v4.1-flash') process.exit(3);
+if (settings.defaultThinkingLevel !== 'medium') process.exit(11);
 const declaredModels = Object.values(models.providers ?? {}).flatMap(provider => provider.models ?? []);
 if (!declaredModels.length) process.exit(4);
 for (const m of declaredModels) {
